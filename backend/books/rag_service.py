@@ -9,11 +9,18 @@ from books.ai_service import Anthropic
 
 chroma_client = PersistentClient(path="./chroma_db")
 collection = chroma_client.get_or_create_collection("books_collection")
-embedder = None
-try:
-    embedder = SentenceTransformer("all-MiniLM-L6-v2")
-except:
-    print("SentenceTransformer init failed - RAG disabled")
+_embedder = None
+
+def get_embedder():
+    global _embedder
+    if _embedder is None:
+        try:
+            from sentence_transformers import SentenceTransformer
+            _embedder = SentenceTransformer("all-MiniLM-L6-v2")
+        except Exception as e:
+            print(f"SentenceTransformer failed: {e} - RAG disabled")
+            _embedder = None
+    return _embedder
 
 def chunk_text(text: str, chunk_size: int = 200, overlap: int = 40) -> List[str]:
     words = text.split()
@@ -47,6 +54,9 @@ def index_book(book: Book) -> bool:
             
             for i, chunk in enumerate(chunks):
                 chroma_id = f"book_{book.id}_chunk_{i}"
+                embedder = get_embedder()
+                if embedder is None:
+                    return False
                 embedding = embedder.encode(chunk).tolist()
                 
                 ids.append(chroma_id)
@@ -89,6 +99,9 @@ def delete_book_from_index(book_id: int) -> None:
 
 def rag_query(question: str) -> Dict[str, Any]:
     try:
+        embedder = get_embedder()
+        if embedder is None:
+            return {"answer": "Embeddings unavailable", "sources": []}
         question_embedding = embedder.encode(question).tolist()
         results = collection.query(
             query_embeddings=[question_embedding],
