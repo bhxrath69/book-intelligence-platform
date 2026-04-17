@@ -1,0 +1,10 @@
+Django==5.0.6
+djangorestframework==3.15.1
+django-cors-headers==4.4.0
+mysqlclient==2.2.4
+chromadb==0.5.5
+sentence-transformers==3.0.1
+selenium==4.23.1
+requests==2.32.3
+python-dotenv==1.0.1
+anthropic==0.34.2

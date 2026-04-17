@@ -1,0 +1,14 @@
+django==5.1.7
+djangorestframework==3.14.0
+django-cors-headers==4.3.1
+mysqlclient==2.2.0
+chromadb==0.4.24
+sentence-transformers==2.2.2
+selenium==4.15.2
+anthropic==0.25.1
+python-dotenv==1.0.0
+requests==2.31.0
+beautifulsoup4==4.12.2
+Pillow==10.0.1
+webdriver-manager==4.0.1
+
