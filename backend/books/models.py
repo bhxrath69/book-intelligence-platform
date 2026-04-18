@@ -7,7 +7,7 @@ class Book(models.Model):
     rating = models.FloatField(null=True, blank=True)
     num_reviews = models.IntegerField(default=0)
     description = models.TextField(blank=True, default='')
-    book_url = models.URLField(unique=True, max_length=1000)
+    book_url = models.URLField(unique=True, max_length=255)
     cover_image_url = models.URLField(blank=True, max_length=1000)
     genre = models.CharField(max_length=100, blank=True, default='')
     summary = models.TextField(blank=True, default='')

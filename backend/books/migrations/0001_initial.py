@@ -21,7 +21,7 @@ class Migration(migrations.Migration):
                 ('rating', models.FloatField(blank=True, null=True)),
                 ('num_reviews', models.IntegerField(default=0)),
                 ('description', models.TextField(blank=True, default='')),
-                ('book_url', models.URLField(max_length=1000, unique=True)),
+                ('book_url', models.URLField(max_length=255, unique=True)),
                 ('cover_image_url', models.URLField(blank=True, max_length=1000)),
                 ('genre', models.CharField(blank=True, default='', max_length=100)),
                 ('summary', models.TextField(blank=True, default='')),
