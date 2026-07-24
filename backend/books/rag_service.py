@@ -3,7 +3,7 @@ from typing import Any, Dict, List
 
 from django.db import transaction
 
-from books.ai_service import get_anthropic_client
+from books.ai_service import call_ollama
 from books.models import Book, BookChunk
 
 logger = logging.getLogger(__name__)
@@ -44,7 +44,6 @@ def get_embedder():
     if _embedder is None:
         try:
             from sentence_transformers import SentenceTransformer
-
             _embedder = SentenceTransformer("all-MiniLM-L6-v2")
         except Exception as exc:
             logger.warning("SentenceTransformer failed: %s - RAG disabled", exc)
@@ -66,6 +65,16 @@ def chunk_text(text: str, chunk_size: int = 200, overlap: int = 40) -> List[str]
     return chunks
 
 
+def strip_gutenberg(text: str) -> str:
+    if "*** START OF" in text:
+        text = text.split("*** START OF")[1]
+        if "***" in text:
+            text = text.split("***", 1)[1]
+    if "*** END OF" in text:
+        text = text.split("*** END OF")[0]
+    return text.strip()
+
+
 def index_book(book: Book) -> bool:
     try:
         active_collection = get_collection()
@@ -73,16 +82,15 @@ def index_book(book: Book) -> bool:
         if active_collection is None or embedder is None:
             return False
 
-        # Prefer real book content. Fallback to metadata if unavailable.
         full_text = (book.full_text or '').strip()
         if len(full_text) < 50:
             full_text = f"{book.title} {book.description}".strip()
-
         if len(full_text) < 50:
             return False
 
-        chunks = chunk_text(full_text)
+        full_text = strip_gutenberg(full_text)
 
+        chunks = chunk_text(full_text)
         if not chunks:
             return False
 
@@ -100,7 +108,11 @@ def index_book(book: Book) -> bool:
 
                 ids.append(chroma_id)
                 embeddings.append(embedding)
-                metadatas.append({"book_id": book.id, "title": book.title, "author": book.author})
+                metadatas.append({
+                    "book_id": book.id,
+                    "title": book.title,
+                    "author": book.author
+                })
                 documents.append(chunk)
 
                 BookChunk.objects.create(
@@ -159,8 +171,6 @@ def rag_query(question: str) -> Dict[str, Any]:
 
         context = "\n\n".join(results['documents'][0])
         sources = list(set([m['title'] for m in results['metadatas'][0]]))
-
-        from books.ai_service import call_ollama
 
         prompt = f"""You are a helpful book assistant. Using only the following book information as context, answer the user's question. If the answer cannot be found in the context, say so.
 
