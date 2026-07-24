@@ -1,0 +1,16 @@
+.env
+venv/
+backend/venv/
+__pycache__/
+*.pyc
+*.pyo
+chroma_db/
+staticfiles/
+media/
+*.log
+.DS_Store
+archive/
+frontend/node_modules/
+*.dll
+*.exe
+*.pyd
