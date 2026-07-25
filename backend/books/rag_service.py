@@ -23,13 +23,10 @@ _embedder = None
 
 def get_collection():
     global chroma_client, collection
-
     if chromadb is None or PersistentClient is None:
         return None
-
     if collection is not None:
         return collection
-
     try:
         chroma_client = PersistentClient(path="./chroma_db")
         collection = chroma_client.get_or_create_collection("books_collection")
@@ -55,7 +52,6 @@ def chunk_text(text: str, chunk_size: int = 200, overlap: int = 40) -> List[str]
     words = text.split()
     if len(words) < 10:
         return []
-
     chunks = []
     step = chunk_size - overlap
     for i in range(0, len(words) - chunk_size + 1, step):
@@ -101,11 +97,9 @@ def index_book(book: Book) -> bool:
 
         with transaction.atomic():
             BookChunk.objects.filter(book=book).delete()
-
             for i, chunk in enumerate(chunks):
                 chroma_id = f"book_{book.id}_chunk_{i}"
                 embedding = embedder.encode(chunk).tolist()
-
                 ids.append(chroma_id)
                 embeddings.append(embedding)
                 metadatas.append({
@@ -114,21 +108,18 @@ def index_book(book: Book) -> bool:
                     "author": book.author
                 })
                 documents.append(chunk)
-
                 BookChunk.objects.create(
                     book=book,
                     chunk_text=chunk,
                     chunk_index=i,
                     chroma_id=chroma_id,
                 )
-
             active_collection.upsert(
                 ids=ids,
                 embeddings=embeddings,
                 metadatas=metadatas,
                 documents=documents,
             )
-
         return True
     except Exception as exc:
         logger.warning("Index error: %s", exc)
@@ -140,7 +131,6 @@ def delete_book_from_index(book_id: int) -> None:
         active_collection = get_collection()
         if active_collection is None:
             return
-
         results = active_collection.get(
             where={"book_id": book_id},
             include=["metadatas"],
@@ -192,6 +182,8 @@ Provide a clear helpful answer with specific book references."""
     except Exception as exc:
         logger.warning("RAG error: %s", exc)
         return {"answer": "Sorry, unable to answer at this time.", "sources": []}
+
+
 def rag_query_with_history(question: str, book_id: int, session_id: int = None) -> Dict[str, Any]:
     from books.models import ChatSession, Message, Book
 
@@ -210,45 +202,42 @@ def rag_query_with_history(question: str, book_id: int, session_id: int = None) 
         session = ChatSession.objects.create(book=book)
 
     # Save user message
-# Save user message
-        Message.objects.create(session=session, role='user', content=question)
+    Message.objects.create(session=session, role='user', content=question)
 
-        # Build conversation history for context
-        messages = list(session.messages.order_by('timestamp'))
-        history = [
-            {"role": m.role, "content": m.content}
-            for m in messages[:-1]
-        ]
-
-        # Retrieve relevant chunks from ChromaDB filtered by book
+    # Build conversation history — convert queryset to list first
+    all_messages = list(session.messages.order_by('timestamp'))
+    history = [
+        {"role": m.role, "content": m.content}
+        for m in all_messages[:-1]
+    ]
 
     # Retrieve relevant chunks from ChromaDB filtered by book
+    context = ""
+    sources = []
     try:
         active_collection = get_collection()
         embedder = get_embedder()
-        if active_collection is None or embedder is None:
-            return {"answer": "Embeddings unavailable", "sources": [], "session_id": session.id}
-
-        question_embedding = embedder.encode(question).tolist()
-        results = active_collection.query(
-            query_embeddings=[question_embedding],
-            n_results=5,
-            where={"book_id": book_id},
-            include=["documents", "metadatas"],
-        )
-
-        context = "\n\n".join(results['documents'][0]) if results['documents'][0] else ""
-        sources = list(set([m['title'] for m in results['metadatas'][0]])) if results['metadatas'][0] else []
-
+        if active_collection is not None and embedder is not None:
+            question_embedding = embedder.encode(question).tolist()
+            results = active_collection.query(
+                query_embeddings=[question_embedding],
+                n_results=5,
+                where={"book_id": book_id},
+                include=["documents", "metadatas"],
+            )
+            if results['documents'][0]:
+                context = "\n\n".join(results['documents'][0])
+                sources = list(set([m['title'] for m in results['metadatas'][0]]))
     except Exception as exc:
         logger.warning("Retrieval error: %s", exc)
-        context = ""
-        sources = []
 
     # Build history string for prompt
     history_text = ""
     if history:
-        history_text = "\n".join([f"{m['role'].capitalize()}: {m['content']}" for m in history])
+        history_text = "\n".join([
+            f"{m['role'].capitalize()}: {m['content']}"
+            for m in history
+        ])
         history_text = f"\nPrevious conversation:\n{history_text}\n"
 
     prompt = f"""You are a helpful assistant for the book '{book.title}' by {book.author}.
