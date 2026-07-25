@@ -188,7 +188,7 @@ class BookViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'], url_path='chat')
     def chat(self, request, pk=None):
         question = request.data.get('question', '').strip()
-        session_id = request.data.get('session_id')
+        session_id = request.data.get('session_id', None)
 
         if not question:
             return Response(
@@ -196,16 +196,14 @@ class BookViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        from .rag_service import rag_query_with_history
-
-        result = rag_query_with_history(
+        from .rag_service import hybrid_rag_query
+        result = hybrid_rag_query(
             question=question,
             book_id=int(pk),
             session_id=session_id
         )
 
         return Response(result)
-
     @action(detail=True, methods=['get'], url_path='history')
     def history(self, request, pk=None):
         from .models import ChatSession
