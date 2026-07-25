@@ -6,7 +6,26 @@ from django.db import transaction
 from books.ai_service import call_ollama
 from books.models import Book, BookChunk
 
+
+
 logger = logging.getLogger(__name__)
+
+def get_cache_key(question: str, book_id: int) -> str:
+    import hashlib
+    return hashlib.sha256(f"{book_id}:{question}".encode()).hexdigest()
+
+
+def get_cached_answer(question: str, book_id: int):
+    from django.core.cache import cache
+    key = get_cache_key(question, book_id)
+    return cache.get(key), key
+
+
+def set_cached_answer(key: str, response: dict, ttl: int = 86400):
+    from django.core.cache import cache
+    cache.set(key, response, ttl)
+
+
 
 try:
     import chromadb
@@ -321,6 +340,14 @@ def hybrid_rag_query(question: str, book_id: int, session_id: int = None) -> Dic
     else:
         session = ChatSession.objects.create(book=book)
 
+# Check cache first
+    cached, cache_key = get_cached_answer(question, book_id)
+    if cached:
+        cached['session_id'] = session.id
+        cached['cache_hit'] = True
+        return cached
+    
+
     Message.objects.create(session=session, role='user', content=question)
 
     all_messages = list(session.messages.order_by('timestamp'))
@@ -421,6 +448,13 @@ Answer:"""
         answer = "Sorry, unable to answer at this time."
 
     Message.objects.create(session=session, role='assistant', content=answer)
+
+    # Store in cache
+    set_cached_answer(cache_key, {
+        "answer": answer,
+        "sources": sources,
+        "retrieval": "hybrid_bm25_vector_rrf_mmr",
+    })
 
     return {
         "answer": answer,
