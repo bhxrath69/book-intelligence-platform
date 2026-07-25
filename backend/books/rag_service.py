@@ -70,6 +70,47 @@ def strip_gutenberg(text: str) -> str:
         text = text.split("*** END OF")[0]
     return text.strip()
 
+def mmr(query_embedding: List[float], chunk_embeddings: List[List[float]], 
+        chunks: List[str], top_k: int = 5, lambda_: float = 0.5) -> List[str]:
+    """
+    Maximal Marginal Relevance — balances relevance vs diversity.
+    Prevents returning near-duplicate chunks to Claude.
+    """
+    import numpy as np
+
+    if not chunk_embeddings or not chunks:
+        return chunks[:top_k]
+
+    def cosine_sim(a, b):
+        a, b = np.array(a), np.array(b)
+        denom = np.linalg.norm(a) * np.linalg.norm(b)
+        if denom == 0:
+            return 0.0
+        return float(np.dot(a, b) / denom)
+
+    selected = []
+    candidates = list(range(len(chunks)))
+
+    for _ in range(min(top_k, len(chunks))):
+        mmr_scores = {}
+        for idx in candidates:
+            relevance = cosine_sim(query_embedding, chunk_embeddings[idx])
+            if selected:
+                redundancy = max(
+                    cosine_sim(chunk_embeddings[idx], chunk_embeddings[s])
+                    for s in selected
+                )
+            else:
+                redundancy = 0.0
+            mmr_scores[idx] = lambda_ * relevance - (1 - lambda_) * redundancy
+
+        best = max(mmr_scores, key=mmr_scores.get)
+        selected.append(best)
+        candidates.remove(best)
+
+    return [chunks[i] for i in selected]
+
+
 
 def index_book(book: Book) -> bool:
     try:
@@ -272,7 +313,6 @@ def hybrid_rag_query(question: str, book_id: int, session_id: int = None) -> Dic
     except Book.DoesNotExist:
         return {"answer": "Book not found.", "sources": [], "session_id": None}
 
-    # Get or create session
     if session_id:
         try:
             session = ChatSession.objects.get(pk=session_id, book=book)
@@ -281,32 +321,26 @@ def hybrid_rag_query(question: str, book_id: int, session_id: int = None) -> Dic
     else:
         session = ChatSession.objects.create(book=book)
 
-    # Save user message
     Message.objects.create(session=session, role='user', content=question)
 
-    # Build conversation history
     all_messages = list(session.messages.order_by('timestamp'))
     history = [
         {"role": m.role, "content": m.content}
         for m in all_messages[:-1]
     ]
 
-    # Get all chunks for this book from MySQL
     db_chunks = list(BookChunk.objects.filter(book_id=book_id).order_by('chunk_index'))
     context = ""
     sources = []
+    active_collection = get_collection()
+    embedder = get_embedder()
 
     if db_chunks:
         corpus = [c.chunk_text for c in db_chunks]
 
-        # BM25 sparse retrieval
         tokenized = [c.split() for c in corpus]
         bm25 = BM25Okapi(tokenized)
         bm25_scores = bm25.get_scores(question.split())
-
-        # Vector dense retrieval
-        active_collection = get_collection()
-        embedder = get_embedder()
 
         vec_indices = []
         if active_collection is not None and embedder is not None:
@@ -318,7 +352,6 @@ def hybrid_rag_query(question: str, book_id: int, session_id: int = None) -> Dic
                     where={"book_id": book_id},
                     include=["documents", "metadatas"],
                 )
-                # Extract chunk indices from chroma IDs
                 for chroma_id in vec_results['ids'][0]:
                     try:
                         idx = int(chroma_id.split('_chunk_')[1])
@@ -328,27 +361,42 @@ def hybrid_rag_query(question: str, book_id: int, session_id: int = None) -> Dic
             except Exception as exc:
                 logger.warning("Vector retrieval error: %s", exc)
 
-        # RRF merge — Reciprocal Rank Fusion
         k = 60
         rrf_scores = {}
 
-        # BM25 ranking contribution
         bm25_ranked = bm25_scores.argsort()[::-1][:10]
         for rank, idx in enumerate(bm25_ranked):
             rrf_scores[int(idx)] = rrf_scores.get(int(idx), 0) + 1 / (k + rank)
 
-        # Vector ranking contribution
         for rank, idx in enumerate(vec_indices):
             if idx < len(corpus):
                 rrf_scores[idx] = rrf_scores.get(idx, 0) + 1 / (k + rank)
 
-        # Get top 5 chunks by RRF score
-        top_indices = sorted(rrf_scores, key=rrf_scores.get, reverse=True)[:5]
-        top_chunks = [corpus[i] for i in top_indices if i < len(corpus)]
-        sources = list(set([db_chunks[i].book.title for i in top_indices if i < len(db_chunks)]))
+        top_indices = sorted(rrf_scores, key=rrf_scores.get, reverse=True)[:10]
+        candidate_chunks = [corpus[i] for i in top_indices if i < len(corpus)]
+
+        if active_collection is not None and embedder is not None and candidate_chunks:
+            candidate_embeddings = [
+                embedder.encode(c).tolist() for c in candidate_chunks
+            ]
+            question_embedding_for_mmr = embedder.encode(question).tolist()
+            top_chunks = mmr(
+                query_embedding=question_embedding_for_mmr,
+                chunk_embeddings=candidate_embeddings,
+                chunks=candidate_chunks,
+                top_k=5,
+                lambda_=0.5
+            )
+        else:
+            top_chunks = candidate_chunks[:5]
+
+        sources = list(set([
+            db_chunks[i].book.title
+            for i in top_indices[:5]
+            if i < len(db_chunks)
+        ]))
         context = "\n\n".join(top_chunks)
 
-    # Build history string
     history_text = ""
     if history:
         history_text = "\n".join([
@@ -372,12 +420,11 @@ Answer:"""
     if not answer:
         answer = "Sorry, unable to answer at this time."
 
-    # Save assistant response
     Message.objects.create(session=session, role='assistant', content=answer)
 
     return {
         "answer": answer,
         "sources": sources,
         "session_id": session.id,
-        "retrieval": "hybrid_bm25_vector_rrf",
+        "retrieval": "hybrid_bm25_vector_rrf_mmr",
     }
