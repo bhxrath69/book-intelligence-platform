@@ -192,3 +192,85 @@ Provide a clear helpful answer with specific book references."""
     except Exception as exc:
         logger.warning("RAG error: %s", exc)
         return {"answer": "Sorry, unable to answer at this time.", "sources": []}
+def rag_query_with_history(question: str, book_id: int, session_id: int = None) -> Dict[str, Any]:
+    from books.models import ChatSession, Message, Book
+
+    try:
+        book = Book.objects.get(pk=book_id)
+    except Book.DoesNotExist:
+        return {"answer": "Book not found.", "sources": [], "session_id": None}
+
+    # Get or create session
+    if session_id:
+        try:
+            session = ChatSession.objects.get(pk=session_id, book=book)
+        except ChatSession.DoesNotExist:
+            session = ChatSession.objects.create(book=book)
+    else:
+        session = ChatSession.objects.create(book=book)
+
+    # Save user message
+# Save user message
+        Message.objects.create(session=session, role='user', content=question)
+
+        # Build conversation history for context
+        messages = list(session.messages.order_by('timestamp'))
+        history = [
+            {"role": m.role, "content": m.content}
+            for m in messages[:-1]
+        ]
+
+        # Retrieve relevant chunks from ChromaDB filtered by book
+
+    # Retrieve relevant chunks from ChromaDB filtered by book
+    try:
+        active_collection = get_collection()
+        embedder = get_embedder()
+        if active_collection is None or embedder is None:
+            return {"answer": "Embeddings unavailable", "sources": [], "session_id": session.id}
+
+        question_embedding = embedder.encode(question).tolist()
+        results = active_collection.query(
+            query_embeddings=[question_embedding],
+            n_results=5,
+            where={"book_id": book_id},
+            include=["documents", "metadatas"],
+        )
+
+        context = "\n\n".join(results['documents'][0]) if results['documents'][0] else ""
+        sources = list(set([m['title'] for m in results['metadatas'][0]])) if results['metadatas'][0] else []
+
+    except Exception as exc:
+        logger.warning("Retrieval error: %s", exc)
+        context = ""
+        sources = []
+
+    # Build history string for prompt
+    history_text = ""
+    if history:
+        history_text = "\n".join([f"{m['role'].capitalize()}: {m['content']}" for m in history])
+        history_text = f"\nPrevious conversation:\n{history_text}\n"
+
+    prompt = f"""You are a helpful assistant for the book '{book.title}' by {book.author}.
+Answer questions using only the provided context from this book.
+If the answer is not in the context, say so clearly.
+{history_text}
+Context from the book:
+{context}
+
+Current question: {question}
+
+Answer:"""
+
+    answer = call_ollama(prompt, max_tokens=500)
+    if not answer:
+        answer = "Sorry, unable to answer at this time."
+
+    # Save assistant response
+    Message.objects.create(session=session, role='assistant', content=answer)
+
+    return {
+        "answer": answer,
+        "sources": sources,
+        "session_id": session.id,
+    }

@@ -42,3 +42,27 @@ class BookChunk(models.Model):
 
     def __str__(self):
         return f"Chunk {self.chunk_index} - {self.book.title}"
+
+class ChatSession(models.Model):
+    book = models.ForeignKey(Book, on_delete=models.CASCADE, related_name='sessions')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Session {self.id} - {self.book.title}"
+
+
+class Message(models.Model):
+    ROLE_CHOICES = [('user', 'User'), ('assistant', 'Assistant')]
+    session = models.ForeignKey(ChatSession, on_delete=models.CASCADE, related_name='messages')
+    role = models.CharField(max_length=10, choices=ROLE_CHOICES)
+    content = models.TextField()
+    timestamp = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['timestamp']
+
+    def __str__(self):
+        return f"{self.role}: {self.content[:50]}"

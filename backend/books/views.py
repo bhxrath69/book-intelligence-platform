@@ -172,3 +172,62 @@ class BookViewSet(viewsets.ModelViewSet):
             'genres': genres,
             'average_rating': round(float(avg_rating), 1)
         })
+    @action(detail=False, methods=['get'], url_path='stats')
+    def stats(self, request):
+        total_books = Book.objects.count()
+        processed_books = Book.objects.filter(is_processed=True).count()
+        genres = dict(Book.objects.values('genre').annotate(count=Count('genre')).order_by('-count').values_list('genre', 'count'))
+        avg_rating = Book.objects.filter(rating__isnull=False).aggregate(Avg('rating'))['rating__avg'] or 0
+
+        return Response({
+            'total_books': total_books,
+            'processed_books': processed_books,
+            'genres': genres,
+            'average_rating': round(float(avg_rating), 1)
+        })
+    @action(detail=True, methods=['post'], url_path='chat')
+    def chat(self, request, pk=None):
+        question = request.data.get('question', '').strip()
+        session_id = request.data.get('session_id')
+
+        if not question:
+            return Response(
+                {'error': 'Question required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        from .rag_service import rag_query_with_history
+
+        result = rag_query_with_history(
+            question=question,
+            book_id=int(pk),
+            session_id=session_id
+        )
+
+        return Response(result)
+
+    @action(detail=True, methods=['get'], url_path='history')
+    def history(self, request, pk=None):
+        from .models import ChatSession
+
+        sessions = ChatSession.objects.filter(
+            book_id=pk
+        ).prefetch_related('messages')
+
+        data = []
+
+        for session in sessions:
+            data.append({
+                'session_id': session.id,
+                'created_at': session.created_at,
+                'messages': [
+                    {
+                        'role': m.role,
+                        'content': m.content,
+                        'timestamp': m.timestamp
+                    }
+                    for m in session.messages.all()
+                ]
+            })
+
+        return Response(data)
