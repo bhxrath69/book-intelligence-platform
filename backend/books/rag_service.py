@@ -370,6 +370,7 @@ def hybrid_rag_query(question: str, book_id: int, session_id: int = None) -> Dic
         bm25_scores = bm25.get_scores(question.split())
 
         vec_indices = []
+        vec_chroma_ids = []  # store chroma_ids for later embedding fetch
         if active_collection is not None and embedder is not None:
             try:
                 question_embedding = embedder.encode(question).tolist()
@@ -377,12 +378,13 @@ def hybrid_rag_query(question: str, book_id: int, session_id: int = None) -> Dic
                     query_embeddings=[question_embedding],
                     n_results=min(10, len(corpus)),
                     where={"book_id": book_id},
-                    include=["documents", "metadatas"],
+                    include=["documents", "metadatas", "embeddings"],
                 )
                 for chroma_id in vec_results['ids'][0]:
                     try:
                         idx = int(chroma_id.split('_chunk_')[1])
                         vec_indices.append(idx)
+                        vec_chroma_ids.append(chroma_id)
                     except (IndexError, ValueError):
                         continue
             except Exception as exc:
@@ -403,9 +405,34 @@ def hybrid_rag_query(question: str, book_id: int, session_id: int = None) -> Dic
         candidate_chunks = [corpus[i] for i in top_indices if i < len(corpus)]
 
         if active_collection is not None and embedder is not None and candidate_chunks:
-            candidate_embeddings = [
-                embedder.encode(c).tolist() for c in candidate_chunks
+            # Fetch stored embeddings from ChromaDB instead of recomputing with embedder.encode()
+            candidate_chroma_ids = [
+                f"book_{book_id}_chunk_{i}" for i in top_indices if i < len(db_chunks)
             ]
+            stored_data = active_collection.get(
+                ids=candidate_chroma_ids,
+                include=["embeddings", "documents"]
+            )
+            stored_embeddings_map = {}
+            if stored_data and stored_data.get('ids'):
+                for j, cid in enumerate(stored_data['ids']):
+                    try:
+                        stored_idx = int(cid.split('_chunk_')[1])
+                        if stored_data.get('embeddings') and j < len(stored_data['embeddings']):
+                            stored_embeddings_map[stored_idx] = stored_data['embeddings'][j]
+                    except (IndexError, ValueError, TypeError):
+                        continue
+
+            # Build candidate embeddings using stored ChromaDB embeddings, fallback to encode()
+            candidate_embeddings = []
+            for i in top_indices:
+                if i >= len(corpus):
+                    continue
+                if i in stored_embeddings_map:
+                    candidate_embeddings.append(stored_embeddings_map[i])
+                else:
+                    candidate_embeddings.append(embedder.encode(corpus[i]).tolist())
+
             question_embedding_for_mmr = embedder.encode(question).tolist()
             top_chunks = mmr(
                 query_embedding=question_embedding_for_mmr,
