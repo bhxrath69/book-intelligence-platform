@@ -448,4 +448,105 @@ def scrape_books(max_pages: int = 10) -> List[Dict]:
         )
 
     return books
+def search_gutenberg(query: str, max_results: int = 5) -> list:
+    """Search Gutendex API for books matching a title/author query."""
+    try:
+        response = requests.get(
+            "https://gutendex.com/books",
+            params={"search": query},
+            timeout=15
+        )
+        response.raise_for_status()
+        data = response.json()
+        results = []
+        for book in data.get("results", [])[:max_results]:
+            text_url = None
+            for fmt, url in book.get("formats", {}).items():
+                if "text/plain" in fmt:
+                    text_url = url
+                    break
+            if text_url:
+                results.append({
+                    "gutenberg_id": book["id"],
+                    "title": book["title"],
+                    "author": book["authors"][0]["name"] if book.get("authors") else "Unknown",
+                    "text_url": text_url,
+                })
+        return results
+    except Exception as exc:
+        logger.warning("Gutendex search failed: %s", exc)
+        return []
+
+def search_gutenberg(query: str, max_results: int = 5) -> list:
+    """Search Gutendex API for books matching a title/author query across all 70,000+ Gutenberg books."""
+    try:
+        response = requests.get(
+            "https://gutendex.com/books",
+            params={"search": query},
+            timeout=15
+        )
+        response.raise_for_status()
+        data = response.json()
+        results = []
+        for book in data.get("results", [])[:max_results]:
+            text_url = None
+            for fmt, url in book.get("formats", {}).items():
+                if "text/plain" in fmt:
+                    text_url = url
+                    break
+            if text_url:
+                results.append({
+                    "gutenberg_id": book["id"],
+                    "title": book["title"],
+                    "author": book["authors"][0]["name"] if book.get("authors") else "Unknown",
+                    "text_url": text_url,
+                })
+        return results
+    except Exception as exc:
+        logger.warning("Gutendex search failed: %s", exc)
+        return []
+
+
+def download_book_by_search_result(result: dict) -> dict:
+    """Download full text for a single Gutendex search result."""
+    try:
+        response = requests.get(result["text_url"], timeout=30)
+        response.raise_for_status()
+        full_text = response.text
+
+        return {
+            "title": result["title"],
+            "author": result["author"],
+            "book_url": f"https://www.gutenberg.org/ebooks/{result['gutenberg_id']}",
+            "description": "",
+            "rating": None,
+            "num_reviews": 0,
+            "cover_image_url": "",
+            "full_text": full_text,
+        }
+    except Exception as exc:
+        logger.warning("Download failed for %s: %s", result["title"], exc)
+        return None
+
+
+def download_book_by_search_result(result: dict) -> dict:
+    """Download full text for a single Gutendex search result."""
+    try:
+        response = requests.get(result["text_url"], timeout=30)
+        response.raise_for_status()
+        full_text = response.text
+
+        return {
+            "title": result["title"],
+            "author": result["author"],
+            "book_url": f"https://www.gutenberg.org/ebooks/{result['gutenberg_id']}",
+            "description": "",
+            "rating": None,
+            "num_reviews": 0,
+            "cover_image_url": "",
+            "full_text": full_text,
+        }
+    except Exception as exc:
+        logger.warning("Download failed for %s: %s", result["title"], exc)
+        return None
 

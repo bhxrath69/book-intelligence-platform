@@ -19,6 +19,12 @@ class BookViewSet(viewsets.ModelViewSet):
     permission_classes = [AllowAny]
     pagination_class = None
 
+    def get_serializer_class(self):
+        if self.action == 'list':
+            from .serializers import BookListSerializer
+            return BookListSerializer
+        return BookSerializer
+
     @action(detail=False, methods=['post'], url_path='upload')
     def upload(self, request):
         logger.info("Stage upload_entered: method=%s content_type=%s", request.method, request.content_type)
@@ -184,6 +190,56 @@ class BookViewSet(viewsets.ModelViewSet):
             'processed_books': processed_books,
             'genres': genres,
             'average_rating': round(float(avg_rating), 1)
+        })
+
+    @action(detail=False, methods=['get'], url_path='search-gutenberg')
+    def search_gutenberg_books(self, request):
+        query = request.query_params.get('q', '').strip()
+        if not query:
+            return Response({'error': 'Query param "q" required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        from scraper.scrape import search_gutenberg
+        results = search_gutenberg(query, max_results=5)
+        return Response({"results": results})
+
+    @action(detail=False, methods=['post'], url_path='add-from-gutenberg')
+    def add_from_gutenberg(self, request):
+        gutenberg_id = request.data.get('gutenberg_id')
+        title = request.data.get('title')
+        author = request.data.get('author')
+        text_url = request.data.get('text_url')
+
+        if not all([gutenberg_id, title, text_url]):
+            return Response({'error': 'gutenberg_id, title, text_url required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        from scraper.scrape import download_book_by_search_result
+        from .rag_service import index_book
+
+        result = {
+            "gutenberg_id": gutenberg_id,
+            "title": title,
+            "author": author or "Unknown",
+            "text_url": text_url,
+        }
+        book_data = download_book_by_search_result(result)
+
+        if not book_data:
+            return Response({'error': 'Failed to download book'}, status=status.HTTP_502_BAD_GATEWAY)
+
+        book, created = Book.objects.get_or_create(
+            book_url=book_data['book_url'],
+            defaults=book_data
+        )
+        if not created:
+            return Response({'message': 'Book already exists', 'book_id': book.id})
+
+        indexed = index_book(book)
+
+        return Response({
+            'message': 'Book added and indexed' if indexed else 'Book added but indexing failed',
+            'book_id': book.id,
+            'title': book.title,
+            'indexed': indexed
         })
     @action(detail=True, methods=['post'], url_path='chat')
     def chat(self, request, pk=None):
