@@ -460,15 +460,19 @@ def hybrid_rag_query(question: str, book_id: int, session_id: int = None) -> Dic
         history_text = f"\nPrevious conversation:\n{history_text}\n"
 
     prompt = f"""You are a helpful assistant for the book '{book.title}' by {book.author}.
-Answer questions using only the provided context from this book.
-If the answer is not in the context, say so clearly.
+
+STRICT RULES:
+- Only use information explicitly stated in the Context section below.
+- Do NOT mention any other books, authors, or titles that are not '{book.title}' by {book.author}.
+- Do NOT bring in outside knowledge, even if you know it.
+- If the context does not contain the answer, respond exactly with: "I don't have enough information in this book's content to answer that."
 {history_text}
-Context from the book:
+Context from '{book.title}':
 {context}
 
 Current question: {question}
 
-Answer:"""
+Answer (grounded only in the context above):"""
 
     answer = call_ollama(prompt, max_tokens=500)
     if not answer:
