@@ -67,7 +67,7 @@ def get_embedder():
     return _embedder
 
 
-def chunk_text(text: str, chunk_size: int = 200, overlap: int = 40) -> List[str]:
+def chunk_text(text: str, chunk_size: int = 200, overlap: int = 80) -> List[str]:
     words = text.split()
     if len(words) < 10:
         return []
@@ -323,6 +323,48 @@ Answer:"""
         "sources": sources,
         "session_id": session.id,
     }
+def generate_hypothetical_document(question: str, book_title: str, book_author: str = "", attempts: int = 3) -> str:
+    """
+    HyDE (Hypothetical Document Embeddings): generate a short hypothetical passage
+    that would answer the question, written in the narrator's voice and in the
+    book's exact style. This bridges the lexical/semantic gap between question and
+    answer chunks (e.g. "Who is the narrator?" -> "Call me Ishmael.").
+    Retries up to `attempts` times because llama3.2 may occasionally refuse or
+    truncate. Falls back to the raw question if all attempts fail.
+    """
+    author_part = f" by {book_author}" if book_author else ""
+    hyde_prompt = (
+        f"Imitate the exact text of the book '{book_title}'{author_part}. "
+        f"Write 2-4 sentences in the first person, as if you are the narrator of "
+        f"the book introducing yourself at the very start of the book, in a way that "
+        f"answers this question: {question}\n\n"
+        f"Use the narrator's exact name and the exact style of the book's opening "
+        f"chapter, so the passage matches the real text word-for-word. This will be "
+        f"used to locate the corresponding passage in the full text. Do not include "
+        f"any preamble or explanation; output only the passage.\n\n"
+        f"Passage:"
+    )
+    best = ""
+    for i in range(attempts):
+        try:
+            passage = call_ollama(hyde_prompt, max_tokens=150,
+                                  temperature=0.1, seed=42)
+            if passage and len(passage.split()) >= 2:
+                if len(passage) > len(best):
+                    best = passage
+                # A reasonably long passage is almost always a real (or near-verbatim)
+                # excerpt; stop early on success.
+                if len(best.split()) >= 20:
+                    break
+        except Exception as exc:
+            logger.warning("HyDE attempt %d failed: %s", i + 1, exc)
+    if best:
+        logger.info("HyDE passage accepted (best=%d words)", len(best.split()))
+        return best.strip()
+    logger.warning("HyDE generation failed after %d attempts; falling back to raw question", attempts)
+    return question
+
+
 def hybrid_rag_query(question: str, book_id: int, session_id: int = None) -> Dict[str, Any]:
     from rank_bm25 import BM25Okapi
     from books.models import ChatSession, Message, Book
@@ -369,39 +411,62 @@ def hybrid_rag_query(question: str, book_id: int, session_id: int = None) -> Dic
         bm25 = BM25Okapi(tokenized)
         bm25_scores = bm25.get_scores(question.split())
 
-        vec_indices = []
-        vec_chroma_ids = []  # store chroma_ids for later embedding fetch
-        if active_collection is not None and embedder is not None:
+        # HyDE: generate a hypothetical answer passage to bridge the
+        # query->answer lexical/semantic gap (e.g. "Who is the narrator?" -> "Call me Ishmael.")
+        hyde_passage = generate_hypothetical_document(question, book.title, book.author)
+        hyde_embedding = None
+        if embedder is not None:
             try:
-                question_embedding = embedder.encode(question).tolist()
-                vec_results = active_collection.query(
-                    query_embeddings=[question_embedding],
-                    n_results=min(10, len(corpus)),
-                    where={"book_id": book_id},
-                    include=["documents", "metadatas", "embeddings"],
-                )
-                for chroma_id in vec_results['ids'][0]:
-                    try:
-                        idx = int(chroma_id.split('_chunk_')[1])
-                        vec_indices.append(idx)
-                        vec_chroma_ids.append(chroma_id)
-                    except (IndexError, ValueError):
-                        continue
+                hyde_embedding = embedder.encode(hyde_passage).tolist()
             except Exception as exc:
-                logger.warning("Vector retrieval error: %s", exc)
+                logger.warning("HyDE embedding failed: %s", exc)
+        logger.info("HyDE passage for '%s': %s", question, hyde_passage[:200])
 
-        k = 60
+        # Pool size for BM25 + vector (question) + vector (HyDE) before RRF
+        pool_size = 50
+        k = 60  # RRF constant
+
         rrf_scores = {}
 
-        bm25_ranked = bm25_scores.argsort()[::-1][:10]
+        bm25_ranked = bm25_scores.argsort()[::-1][:pool_size]
         for rank, idx in enumerate(bm25_ranked):
             rrf_scores[int(idx)] = rrf_scores.get(int(idx), 0) + 1 / (k + rank)
 
-        for rank, idx in enumerate(vec_indices):
-            if idx < len(corpus):
-                rrf_scores[idx] = rrf_scores.get(idx, 0) + 1 / (k + rank)
+        def add_vector_rankings(query_text: str, tag: str) -> List[int]:
+            """Query ChromaDB with the given text embedding and add RRF scores.
+            Returns the list of chunk indices retrieved."""
+            if active_collection is None or embedder is None:
+                return []
+            try:
+                q_emb = embedder.encode(query_text).tolist()
+                vec_results = active_collection.query(
+                    query_embeddings=[q_emb],
+                    n_results=min(pool_size, len(corpus)),
+                    where={"book_id": book_id},
+                    include=["documents", "metadatas", "embeddings"],
+                )
+                indices = []
+                for chroma_id in vec_results['ids'][0]:
+                    try:
+                        idx = int(chroma_id.split('_chunk_')[1])
+                        indices.append(idx)
+                    except (IndexError, ValueError):
+                        continue
+                for rank, idx in enumerate(indices):
+                    if idx < len(corpus):
+                        rrf_scores[idx] = rrf_scores.get(idx, 0) + 1 / (k + rank)
+                return indices
+            except Exception as exc:
+                logger.warning("Vector retrieval error (%s): %s", tag, exc)
+                return []
 
-        top_indices = sorted(rrf_scores, key=rrf_scores.get, reverse=True)[:10]
+        question_vec_indices = add_vector_rankings(question, "question")
+        hyde_vec_indices = add_vector_rankings(hyde_passage, "hyde")
+
+        # All vector indices (question + hyde) for later embedding fetch
+        vec_indices = list(dict.fromkeys(question_vec_indices + hyde_vec_indices))
+
+        top_indices = sorted(rrf_scores, key=rrf_scores.get, reverse=True)[:pool_size]
         candidate_chunks = [corpus[i] for i in top_indices if i < len(corpus)]
 
         if active_collection is not None and embedder is not None and candidate_chunks:
@@ -433,9 +498,9 @@ def hybrid_rag_query(question: str, book_id: int, session_id: int = None) -> Dic
                 else:
                     candidate_embeddings.append(embedder.encode(corpus[i]).tolist())
 
-            question_embedding_for_mmr = embedder.encode(question).tolist()
+            mmr_query_embedding = hyde_embedding if hyde_embedding is not None else embedder.encode(question).tolist()
             top_chunks = mmr(
-                query_embedding=question_embedding_for_mmr,
+                query_embedding=mmr_query_embedding,
                 chunk_embeddings=candidate_embeddings,
                 chunks=candidate_chunks,
                 top_k=5,
@@ -484,12 +549,12 @@ Answer (grounded only in the context above):"""
     set_cached_answer(cache_key, {
         "answer": answer,
         "sources": sources,
-        "retrieval": "hybrid_bm25_vector_rrf_mmr",
+        "retrieval": "hybrid_bm25_vector_hyde_rrf_mmr",
     })
 
     return {
         "answer": answer,
         "sources": sources,
         "session_id": session.id,
-        "retrieval": "hybrid_bm25_vector_rrf_mmr",
+        "retrieval": "hybrid_bm25_vector_hyde_rrf_mmr",
     }
