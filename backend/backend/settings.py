@@ -24,6 +24,7 @@ INSTALLED_APPS = [
     'rest_framework',
     'corsheaders',
     'books',
+    'agents',
 ]
 
 MIDDLEWARE = [
@@ -123,3 +124,4 @@ CACHES = {
         }
     }
 }
+
