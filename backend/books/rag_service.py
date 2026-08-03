@@ -1,5 +1,5 @@
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 from django.db import transaction
 
@@ -10,9 +10,9 @@ from books.models import Book, BookChunk
 
 logger = logging.getLogger(__name__)
 
-def get_cache_key(question: str, book_id: int) -> str:
+def get_cache_key(question: str, book_id: int, version: str = "v2") -> str:
     import hashlib
-    return hashlib.sha256(f"{book_id}:{question}".encode()).hexdigest()
+    return hashlib.sha256(f"{version}:{book_id}:{question}".encode()).hexdigest()
 
 
 def get_cached_answer(question: str, book_id: int):
@@ -331,6 +331,10 @@ def generate_hypothetical_document(question: str, book_title: str, book_author: 
     answer chunks (e.g. "Who is the narrator?" -> "Call me Ishmael.").
     Retries up to `attempts` times because llama3.2 may occasionally refuse or
     truncate. Falls back to the raw question if all attempts fail.
+
+    Returns: the hypothetical passage (str) if generated, or the original
+    question (str) as fallback. Callers should compare the return value to the
+    original question to determine whether HyDE was actually used.
     """
     author_part = f" by {book_author}" if book_author else ""
     hyde_prompt = (
@@ -382,13 +386,12 @@ def hybrid_rag_query(question: str, book_id: int, session_id: int = None) -> Dic
     else:
         session = ChatSession.objects.create(book=book)
 
-# Check cache first
+    # Check cache first
     cached, cache_key = get_cached_answer(question, book_id)
     if cached:
         cached['session_id'] = session.id
         cached['cache_hit'] = True
         return cached
-    
 
     Message.objects.create(session=session, role='user', content=question)
 
@@ -403,6 +406,7 @@ def hybrid_rag_query(question: str, book_id: int, session_id: int = None) -> Dic
     sources = []
     active_collection = get_collection()
     embedder = get_embedder()
+    hyde_used = False
 
     if db_chunks:
         corpus = [c.chunk_text for c in db_chunks]
@@ -414,13 +418,17 @@ def hybrid_rag_query(question: str, book_id: int, session_id: int = None) -> Dic
         # HyDE: generate a hypothetical answer passage to bridge the
         # query->answer lexical/semantic gap (e.g. "Who is the narrator?" -> "Call me Ishmael.")
         hyde_passage = generate_hypothetical_document(question, book.title, book.author)
+        hyde_used = (hyde_passage != question)
         hyde_embedding = None
-        if embedder is not None:
+        if hyde_used and embedder is not None:
             try:
                 hyde_embedding = embedder.encode(hyde_passage).tolist()
             except Exception as exc:
                 logger.warning("HyDE embedding failed: %s", exc)
         logger.info("HyDE passage for '%s': %s", question, hyde_passage[:200])
+        logger.info("HyDE status: %s for question: %s",
+                    "used" if hyde_used else "FALLBACK",
+                    question[:50])
 
         # Pool size for BM25 + vector (question) + vector (HyDE) before RRF
         pool_size = 50
@@ -545,16 +553,18 @@ Answer (grounded only in the context above):"""
 
     Message.objects.create(session=session, role='assistant', content=answer)
 
+    retrieval_tag = "hybrid_bm25_vector_hyde_rrf_mmr" if hyde_used else "hybrid_bm25_vector_rrf_mmr"
+
     # Store in cache
     set_cached_answer(cache_key, {
         "answer": answer,
         "sources": sources,
-        "retrieval": "hybrid_bm25_vector_hyde_rrf_mmr",
+        "retrieval": retrieval_tag,
     })
 
     return {
         "answer": answer,
         "sources": sources,
         "session_id": session.id,
-        "retrieval": "hybrid_bm25_vector_hyde_rrf_mmr",
+        "retrieval": retrieval_tag,
     }
