@@ -13,6 +13,7 @@ from .rag_service import index_book, rag_query
 
 logger = logging.getLogger(__name__)
 
+
 class BookViewSet(viewsets.ModelViewSet):
     queryset = Book.objects.all()
     serializer_class = BookSerializer
@@ -49,7 +50,7 @@ class BookViewSet(viewsets.ModelViewSet):
             errors = []
             indexed_count = 0
             logger.info("Stage records_prepared: preview=%s", scraped_books[:2])
-            
+
             for book_data in scraped_books:
                 try:
                     logger.info("Stage record_save_attempt: book_url=%s title=%s", book_data.get('book_url'), book_data.get('title'))
@@ -58,18 +59,18 @@ class BookViewSet(viewsets.ModelViewSet):
                             book_url=book_data['book_url'],
                             defaults=book_data
                         )
-                        
+
                         if not created and book.is_processed:
                             skipped_count += 1
                             continue
-                        
+
                         book.title = book_data.get('title', book.title)
                         book.author = book_data.get('author', book.author)
                         book.rating = book_data.get('rating')
                         book.num_reviews = book_data.get('num_reviews', 0)
                         book.description = book_data.get('description', '')
                         book.cover_image_url = book_data.get('cover_image_url', '')
-                        
+
                         book.summary = generate_summary(book.title, book.description)
                         book.genre = classify_genre(book.title, book.description)
                         book.sentiment = analyze_sentiment(book.description)
@@ -94,7 +95,7 @@ class BookViewSet(viewsets.ModelViewSet):
                 except Exception as e:
                     logger.exception("Stage record_processing_failed: title=%s error=%s", book_data.get('title', 'unknown'), e)
                     errors.append(f"Error processing {book_data.get('title', 'unknown')}: {str(e)}")
-            
+
             logger.info(
                 "Stage response_returned: saved=%s skipped=%s indexed=%s total_scraped=%s errors=%s",
                 new_count,
@@ -139,7 +140,7 @@ class BookViewSet(viewsets.ModelViewSet):
         question = request.data.get('question', '').strip()
         if not question:
             return Response({'error': 'Question required'}, status=status.HTTP_400_BAD_REQUEST)
-        
+
         result = rag_query(question)
         return Response(result)
 
@@ -150,7 +151,7 @@ class BookViewSet(viewsets.ModelViewSet):
             recs = list(Book.objects.filter(
                 genre=book.genre
             ).exclude(pk=pk).order_by('-rating')[:3])
-            
+
             if len(recs) < 3:
                 recs.extend(Book.objects.filter(
                     author=book.author
@@ -159,25 +160,12 @@ class BookViewSet(viewsets.ModelViewSet):
                 ).exclude(
                     pk__in=[rec.pk for rec in recs]
                 ).order_by('-rating')[:6-len(recs)])
-            
+
             serializer = self.get_serializer(recs, many=True)
             return Response(serializer.data)
         except Book.DoesNotExist:
             return Response([], status=status.HTTP_404_NOT_FOUND)
 
-    @action(detail=False, methods=['get'], url_path='stats')
-    def stats(self, request):
-        total_books = Book.objects.count()
-        processed_books = Book.objects.filter(is_processed=True).count()
-        genres = dict(Book.objects.values('genre').annotate(count=Count('genre')).order_by('-count').values_list('genre', 'count'))
-        avg_rating = Book.objects.filter(rating__isnull=False).aggregate(Avg('rating'))['rating__avg'] or 0
-        
-        return Response({
-            'total_books': total_books,
-            'processed_books': processed_books,
-            'genres': genres,
-            'average_rating': round(float(avg_rating), 1)
-        })
     @action(detail=False, methods=['get'], url_path='stats')
     def stats(self, request):
         total_books = Book.objects.count()
@@ -213,7 +201,6 @@ class BookViewSet(viewsets.ModelViewSet):
             return Response({'error': 'gutenberg_id, title, text_url required'}, status=status.HTTP_400_BAD_REQUEST)
 
         from scraper.scrape import download_book_by_search_result
-        from .rag_service import index_book
 
         result = {
             "gutenberg_id": gutenberg_id,
@@ -241,6 +228,7 @@ class BookViewSet(viewsets.ModelViewSet):
             'title': book.title,
             'indexed': indexed
         })
+
     @action(detail=True, methods=['post'], url_path='chat')
     def chat(self, request, pk=None):
         question = request.data.get('question', '').strip()
@@ -260,6 +248,28 @@ class BookViewSet(viewsets.ModelViewSet):
         )
 
         return Response(result)
+
+    @action(detail=False, methods=['post'], url_path='librarian')
+    def librarian(self, request):
+        query = request.data.get('query', '').strip()
+        book_id = request.data.get('book_id', None)
+        session_id = request.data.get('session_id', None)
+
+        if not query:
+            return Response(
+                {'error': 'Query required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        from agents.librarian_agent import plan_and_execute
+        result = plan_and_execute(
+            query=query,
+            book_id=int(book_id) if book_id is not None else None,
+            session_id=session_id
+        )
+
+        return Response(result)
+
     @action(detail=True, methods=['get'], url_path='history')
     def history(self, request, pk=None):
         from .models import ChatSession
